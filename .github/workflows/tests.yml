@@ -1,0 +1,41 @@
+name: Tests
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+            curl -sSf https://rye.astral.sh/get | bash
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            rye sync
+
+      - name: Run tests
+        run: rye test
+
+      - name: Cache Rye packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/rye
+          key: ${{ runner.os }}-rye-${{ hashFiles('**/rye.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rye-

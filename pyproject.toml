@@ -1,6 +1,6 @@
 [project]
 name = "filmpy"
-version = "0.1.2"
+version = "0.1.3"
 description = "filmpy is a Python library for video processing and manipulation based on MoviePy"
 authors = [
     { name = "lantzk", email = "9219265+lantzk@users.noreply.github.com" }
@@ -42,3 +42,26 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/filmpy"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+preview = true
+select = [
+    # pycodestyle -- checks against some PEP 8 conventions
+    "E",
+    # Pyflakes -- checks python source files for errors
+    "F",
+    # pyupgrade -- automatically upgrade syntax to newer versions
+    "UP",
+    # flake8-bugbear -- finds likely bugs and design problems, opinionated
+    "B",
+    # flake8-simplify -- finds complex code
+    "SIM",
+    # isort -- sorts imports
+    "I",
+]
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 180

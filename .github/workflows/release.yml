@@ -1,0 +1,155 @@
+name: Create Release
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches:
+      - main
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Generate Commit Log
+      id: commit_log
+      run: |
+        echo "Generating commit log..."
+        LAST_TAG=$(git tag -l "v*.*.*" | sort -V | tail -n 2 | head -n 1)
+        CURRENT_TAG=$(git tag -l "v*.*.*" | sort -V | tail -n 1)
+
+        if [ -z "$LAST_TAG" ]; then
+        RANGE="$CURRENT_TAG"
+        else
+          RANGE="$LAST_TAG..$CURRENT_TAG"
+        fi
+        
+        # Get merges into main
+        MERGES=$(git log $RANGE --merges --pretty=format:"%H - %s")
+
+        # Process each merge
+        COMMIT_LOG=""
+        while IFS= read -r merge; do
+            merge_hash=$(echo $merge | cut -d' ' -f1)
+            merge_message=$(echo $merge | cut -d' ' -f3-)
+
+            # Add merge to log
+            COMMIT_LOG+="$merge_hash - Merge: $merge_message\\n"
+            
+            # Get commits that were part of this merge
+            merge_commits=$(git log $merge_hash^..$merge_hash --no-merges --pretty=format:"  %h - %s (%an)")
+            
+            # Add merge commits to log
+            COMMIT_LOG+="$merge_commits\\n\\n"
+        done <<< "$MERGES"
+
+        # Remove trailing newlines
+        COMMIT_LOG=$(echo -e "$COMMIT_LOG" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | sed ':a;N;$!ba;s/\n/\\n/g')
+
+        echo "Commit log:"
+        echo "$COMMIT_LOG"
+        echo "$COMMIT_LOG" > ${{ github.workspace }}/commit_log.txt
+        echo "Commit log saved to ${{ github.workspace }}/commit_log.txt"
+        echo "commit_log_path=${{ github.workspace }}/commit_log.txt" >> $GITHUB_OUTPUT
+
+    - name: Verify Commit Log
+      run: |
+        echo "Verifying commit log..."
+        if [ -s ${{ steps.commit_log.outputs.commit_log_path }} ]; then
+          echo "Commit log file exists and is not empty"
+          cat ${{ steps.commit_log.outputs.commit_log_path }}
+        else
+          echo "Warning: No new commits found. Creating release notes for the current tag."
+          echo "This is a new release tag with no changes since the previous tag." > ${{ steps.commit_log.outputs.commit_log_path }}
+        fi
+
+    - name: Call OpenAI API to Generate Release Notes
+      id: ai_notes
+      run: |
+        LAST_TAG=$(git describe --tags --abbrev=0 --always)
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 --always $LAST_TAG^)
+        CURRENT_TAG=${GITHUB_REF#refs/tags/}
+        echo "Previous tag: $PREVIOUS_TAG"
+        echo "Current tag: $CURRENT_TAG"
+        echo "Calling OpenAI API..."
+        API_DATA=$(cat << EOF
+        {
+          "model": "gpt-4o",
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are an expert at generating detailed release notes for developers from a commit log. Please use markdown formatting in your response."
+            },
+            {
+              "role": "user",
+              "content": "Generate release notes using the Keep a Changelog format from the commit log below. The Keep a Changelog format uses these markdown headers: ### Added (for new features), ### Changed (for changes to existing functionality), ### Deprecated (for soon to-be-removed features), ### Removed (for now removed features), ### Fixed (for any bug fixes), ### Security (in case of vulnerabilities). Use only the applicable headers and do not create any that are not specified. Do not create an Unreleased header. Your goal is to create human-readable release notes, consolidating similar PRs into single bullet points with multiple references where necessary (always prefer merge number for references) Use markdown formatting to link the appropriate PRs to each bullet point. Use @username tagging to link contributors to relevant bullet points. You can see the full changelog for this release at https://github.com/lantzk/filmpy/compare/$PREVIOUS_TAG...$CURRENT_TAG (this also gives you the URL for the repo). Use ## What's changed as the title, then the Keep a Changelog headers listed earlier, and finally link to the full changelog. Do not create subheadings unless it actually provides useful information beyond the headers. Here is the commit log: $(cat ${{ github.workspace }}/commit_log.txt)"
+            }
+          ]
+        }
+        EOF
+        )
+        echo "API request: $API_DATA"
+        RESPONSE=$(curl https://api.openai.com/v1/chat/completions \
+          -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d "$API_DATA")
+          MAX_RETRIES=10
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Checking for API stop condition..."
+            FINISH_REASON=$(echo "$RESPONSE" | jq -r '.choices[0].finish_reason')
+            echo "Finish reason: $FINISH_REASON"
+            echo "Response: $RESPONSE"
+            if [ "$FINISH_REASON" == "stop" ]; then
+              RELEASE_NOTES=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+              if [ -n "$RELEASE_NOTES" ] && [ "$RELEASE_NOTES" != "null" ]; then
+                echo "Release notes generated successfully."
+                break
+              else
+                echo "Error: Release notes are empty or null."
+                RELEASE_NOTES="Error: Failed to generate release notes. Please review the commit log and update the release notes manually."
+              fi
+            else
+              if [ $i -eq $MAX_RETRIES ]; then
+                echo "All retries failed. Using default release notes."
+                RELEASE_NOTES="Failed to generate release notes automatically. Please review the commit log and update the release notes manually."
+              else
+                sleep 5
+              fi
+            fi
+          done
+          echo "Release notes:"
+          echo "$RELEASE_NOTES"
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "$RELEASE_NOTES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+    - name: Create GitHub Release
+      run: |
+        echo "Creating GitHub release..."
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        echo "Tag name: $TAG_NAME"
+        echo "Release notes:"
+        echo "${{ env.RELEASE_NOTES }}"
+        gh release create $TAG_NAME \
+          --title "$TAG_NAME" \
+          --notes "${{ env.RELEASE_NOTES }}"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12.6'
+
+    - name: Build package
+      run: |
+        curl -sSf https://rye.astral.sh/get | bash
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        rye build
+
+    - name: Publish package
+      run: rye publish --token ${{ secrets.PYPI_TOKEN }} --yes
